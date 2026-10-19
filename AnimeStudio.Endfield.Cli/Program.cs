@@ -1264,9 +1264,10 @@ internal static class Program
             }
         }
 
-        // 收集所有 USM 文件
+        // Stream USM files one at a time: the Video block can exceed 6 GB, so
+        // holding every payload in memory exhausts low-memory machines.
         int skippedChunks = 0;
-        var usmFiles = new List<(string Name, byte[] Data, BlockType BT)>();
+        var usmFiles = new List<(string Name, ChunkInfo Chunk, AnimeStudio.Endfield.FileInfo File, BlockType BT)>();
         foreach (var bt in blocks)
         {
             Console.WriteLine($"Scanning {bt}...");
@@ -1277,33 +1278,31 @@ internal static class Program
                 foreach (var file in chunk.Files)
                 {
                     if (file.FileName.EndsWith(".usm", StringComparison.OrdinalIgnoreCase))
-                    {
-                        byte[] data;
-                        try { data = loader.ExtractFileToBytes(bt, chunk, file); }
-                        catch (FileNotFoundException)
-                        {
-                            // 热更模式：chunk 缺失（增量数据），跳过该文件
-                            skippedChunks++;
-                            continue;
-                        }
-                        usmFiles.Add((file.FileName, data, bt));
-                    }
+                        usmFiles.Add((file.FileName, chunk, file, bt));
                 }
             }
         }
 
-        if (skippedChunks > 0)
-            Console.WriteLine($"  (skipped {skippedChunks} USM files whose chunk is missing in this VFS)");
-        Console.WriteLine($"Found {usmFiles.Count} USM files");
         if (usmFiles.Count == 0) return;
 
         int success = 0, errors = 0;
-        var locker = new object();
 
         Parallel.ForEach(usmFiles, new ParallelOptions { MaxDegreeOfParallelism = parsed.Threads }, (usm) =>
         {
             try
             {
+                byte[] data;
+                try
+                {
+                    data = loader.ExtractFileToBytes(usm.BT, usm.Chunk, usm.File);
+                }
+                catch (FileNotFoundException)
+                {
+                    // 热更模式：chunk 缺失（增量数据），跳过该文件
+                    Interlocked.Increment(ref skippedChunks);
+                    return;
+                }
+
                 string outName = wantMp4
                     ? Path.ChangeExtension(usm.Name, ".mp4")
                     : usm.Name;
@@ -1313,11 +1312,11 @@ internal static class Program
 
                 if (wantMp4 && ffmpeg != null)
                 {
-                    ConvertUsmToMp4(usm.Data, outPath, ffmpeg);
+                    ConvertUsmToMp4(data, outPath, ffmpeg);
                 }
                 else
                 {
-                    File.WriteAllBytes(outPath, usm.Data);
+                    File.WriteAllBytes(outPath, data);
                 }
 
                 Interlocked.Increment(ref success);
@@ -1328,6 +1327,9 @@ internal static class Program
                 Console.Error.WriteLine($"  Error: {usm.Name}: {ex.Message}");
             }
         });
+
+        if (skippedChunks > 0)
+            Console.WriteLine($"(skipped {skippedChunks} USM files whose chunk is missing in this VFS)");
 
         Console.WriteLine($"\nComplete: {success} files converted ({errors} errors)");
     }
