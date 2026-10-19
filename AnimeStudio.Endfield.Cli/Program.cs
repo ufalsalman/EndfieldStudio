@@ -771,24 +771,14 @@ internal static class Program
         {
             Console.WriteLine($"  Extracting from {bt.Name()}...");
 
-            List<(string Name, byte[] Data)> pckFiles;
-            try
-            {
-                pckFiles = ExtractPckFiles(loader, bt);
-            }
-            catch (DirectoryNotFoundException)
-            {
-                Console.WriteLine($"    Skip: no PCK files found in {bt.Name()}");
-                continue;
-            }
-
-            if (pckFiles.Count == 0)
+            int pckCount = CountPckFiles(loader, bt);
+            if (pckCount == 0)
             {
                 Console.WriteLine($"    Skip: no PCK files found");
                 continue;
             }
 
-            Console.WriteLine($"    Found {pckFiles.Count} PCK files");
+            Console.WriteLine($"    Found {pckCount} PCK files");
 
             var opts = new ParallelOptions
             {
@@ -801,10 +791,10 @@ internal static class Program
             int skipped = 0;
             Regex? audioFilter = parsed.AudioFilter;
 
-            // 单遍处理：解析每个 PCK 并提取 WEM
-            Parallel.ForEach(pckFiles, opts, pckFile =>
+            // Process one PCK at a time: a single PCK can be >1 GB, so loading
+            // every PCK of a block up front exhausts memory on 8 GB machines.
+            foreach (var (pckName, pckData) in EnumeratePckFiles(loader, bt))
             {
-                var (pckName, pckData) = pckFile;
                 AkpkPackage package;
                 try
                 {
@@ -814,7 +804,7 @@ internal static class Program
                 {
                     Console.Error.WriteLine($"      Error: failed to parse {pckName}: {ex.Message}");
                     Interlocked.Increment(ref errors);
-                    return;
+                    continue;
                 }
 
                 int localSuccess = 0;
@@ -907,7 +897,7 @@ internal static class Program
                 Interlocked.Add(ref errors, localErrors);
                 Interlocked.Add(ref unmapped, localUnmapped);
                 Interlocked.Add(ref skipped, localSkipped);
-            });
+            }
 
             if (audioFilter != null)
                 Console.WriteLine($"    Done: processed {success} entries ({skipped} filtered, {unmapped} unmapped, {errors} errors)");
@@ -953,32 +943,45 @@ internal static class Program
         return null;
     }
 
-    private static List<(string Name, byte[] Data)> ExtractPckFiles(VfsLoader loader, BlockType bt)
+    /// <summary>
+    /// Streams PCK payloads one at a time. PCKs can exceed 1 GB each, so
+    /// materialising a whole block's worth would OOM low-memory machines.
+    /// </summary>
+    private static IEnumerable<(string Name, byte[] Data)> EnumeratePckFiles(VfsLoader loader, BlockType bt)
     {
-        var result = new List<(string, byte[])>();
-        if (!loader.TryLoadBlockInfo(bt, out BlockMainInfo? info)) return result;
+        if (!loader.TryLoadBlockInfo(bt, out BlockMainInfo? info)) yield break;
 
         foreach (var chunk in info.Chunks)
         {
             foreach (var file in chunk.Files)
             {
-                if (file.FileName.EndsWith(".pck", StringComparison.OrdinalIgnoreCase))
+                if (!file.FileName.EndsWith(".pck", StringComparison.OrdinalIgnoreCase)) continue;
+
+                byte[]? data = null;
+                try
                 {
-                    try
-                    {
-                        byte[] data = loader.ExtractFileToBytes(bt, chunk, file);
-                        result.Add((file.FileName, data));
-                    }
-                    catch (FileNotFoundException)
-                    {
-                        // 热更模式：chunk 缺失，跳过
-                        Console.WriteLine($"  Skip: chunk missing for {file.FileName}");
-                    }
+                    data = loader.ExtractFileToBytes(bt, chunk, file);
                 }
+                catch (FileNotFoundException)
+                {
+                    // 热更模式：chunk 缺失，跳过
+                    Console.WriteLine($"  Skip: chunk missing for {file.FileName}");
+                }
+
+                if (data != null) yield return (file.FileName, data);
             }
         }
+    }
 
-        return result;
+    private static int CountPckFiles(VfsLoader loader, BlockType bt)
+    {
+        if (!loader.TryLoadBlockInfo(bt, out BlockMainInfo? info)) return 0;
+
+        int count = 0;
+        foreach (var chunk in info.Chunks)
+            foreach (var file in chunk.Files)
+                if (file.FileName.EndsWith(".pck", StringComparison.OrdinalIgnoreCase)) count++;
+        return count;
     }
 
     // 用于 vgmstream 临时输入文件的目录（优先 /dev/shm，其次系统 temp）

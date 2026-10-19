@@ -59,7 +59,13 @@ public static class VfsParser
             BlockType chunkBlockType = BlockTypes.FromByte(ReadU8(span, ref cursor));
 
             FileTag mainTag;
-            if (codeVersion > 3)
+            if (codeVersion >= 5)
+            {
+                // codeVersion 5 widened the tag fields from i32 to i64
+                long tagRaw = ReadI64Le(span, ref cursor);
+                mainTag = BlockTypes.FileTagFromByte(unchecked((byte)tagRaw));
+            }
+            else if (codeVersion > 3)
             {
                 int tagRaw = ReadI32Le(span, ref cursor);
                 mainTag = BlockTypes.FileTagFromByte(unchecked((byte)tagRaw));
@@ -86,7 +92,12 @@ public static class VfsParser
                 long ivSeed = useEncrypt ? ReadI64Le(span, ref cursor) : 0;
 
                 FileTag fileTag;
-                if (codeVersion > 3)
+                if (codeVersion >= 5)
+                {
+                    long tagRaw = ReadI64Le(span, ref cursor);
+                    fileTag = BlockTypes.FileTagFromByte(unchecked((byte)tagRaw));
+                }
+                else if (codeVersion > 3)
                 {
                     int tagRaw = ReadI32Le(span, ref cursor);
                     fileTag = BlockTypes.FileTagFromByte(unchecked((byte)tagRaw));

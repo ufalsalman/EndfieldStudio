@@ -13,6 +13,7 @@ public sealed class VfsLoader
 
     private readonly string _vfsPath;
     private readonly byte[] _chachaKey;
+    private readonly List<string> _fallbackVfsPaths = new();
 
     public VfsLoader(string streamingAssetsPath, byte[] chacha20Key)
     {
@@ -23,21 +24,75 @@ public sealed class VfsLoader
 
         _vfsPath = Path.Combine(streamingAssetsPath, VfsDir);
         _chachaKey = (byte[])chacha20Key.Clone();
+        DetectSiblingLayers(streamingAssetsPath);
+    }
+
+    /// <summary>
+    /// v1.4.4+ splits data across two VFS layers: the base install
+    /// (Endfield_Data/StreamingAssets) and the hot-update overlay
+    /// (Endfield_Data/Persistent). Chunks referenced by one layer's .blc
+    /// often live in the other, so register the sibling as a read fallback.
+    /// </summary>
+    private void DetectSiblingLayers(string streamingAssetsPath)
+    {
+        try
+        {
+            string abs = Path.GetFullPath(streamingAssetsPath)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string? dataDir = Path.GetDirectoryName(abs);
+            if (dataDir is null) return;
+
+            foreach (string sibling in new[] { "StreamingAssets", "Persistent" })
+            {
+                string candidate = Path.Combine(dataDir, sibling);
+                if (!Directory.Exists(Path.Combine(candidate, VfsDir))) continue;
+                if (string.Equals(Path.GetFullPath(candidate), abs, StringComparison.Ordinal))
+                    continue;
+                _fallbackVfsPaths.Add(Path.Combine(candidate, VfsDir));
+            }
+        }
+        catch
+        {
+            // Path probing is best-effort; extraction still works from the primary layer.
+        }
     }
 
     public string VfsPath => _vfsPath;
 
+    /// <summary>
+    /// Resolves a chunk file, preferring the primary layer and falling back to
+    /// sibling layers when the chunk was shipped only in the other one.
+    /// </summary>
+    private string? ResolveChunkPath(string dirName, string fileName)
+    {
+        string primary = Path.Combine(_vfsPath, dirName, fileName);
+        if (File.Exists(primary)) return primary;
+
+        foreach (string fallback in _fallbackVfsPaths)
+        {
+            string candidate = Path.Combine(fallback, dirName, fileName);
+            if (File.Exists(candidate)) return candidate;
+        }
+        return null;
+    }
+
     public BlockMainInfo LoadBlockInfo(BlockType bt)
     {
         string dirName = BlockHashes.GetDirName(bt);
-        string blockDir = Path.Combine(_vfsPath, dirName);
+        string blockFilePath = Path.Combine(_vfsPath, dirName, dirName + ".blc");
 
-        if (!Directory.Exists(blockDir))
+        if (!File.Exists(blockFilePath))
         {
-            throw new DirectoryNotFoundException($"block directory not found: {dirName}");
+            // Block indexes may live only in the sibling layer (e.g. language
+            // voice blocks are shipped via the hot-update overlay).
+            string? fallback = ResolveChunkPath(dirName, dirName + ".blc");
+            if (fallback is null)
+            {
+                throw new DirectoryNotFoundException($"block directory not found: {dirName}");
+            }
+            blockFilePath = fallback;
         }
 
-        string blockFilePath = Path.Combine(blockDir, dirName + ".blc");
         byte[] blockData = File.ReadAllBytes(blockFilePath);
 
         if (blockData.Length < Keys.BlockHeadLen)
@@ -92,11 +147,12 @@ public sealed class VfsLoader
         if (writer is null) throw new ArgumentNullException(nameof(writer));
 
         string dirName = BlockHashes.GetDirName(bt);
-        string chunkPath = Path.Combine(_vfsPath, dirName, chunk.FileName());
+        string? chunkPath = ResolveChunkPath(dirName, chunk.FileName());
 
-        if (!File.Exists(chunkPath))
+        if (chunkPath is null)
         {
-            throw new FileNotFoundException($"chunk file not found: {chunk.FileName()}", chunkPath);
+            throw new FileNotFoundException(
+                $"chunk file not found: {chunk.FileName()}", Path.Combine(_vfsPath, dirName, chunk.FileName()));
         }
 
         using var stream = new FileStream(

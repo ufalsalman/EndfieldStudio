@@ -26,10 +26,15 @@ public static class BlockHashes
             [BlockType.JsonData] = "775A31D1",
             [BlockType.ExtendData] = "D6E622F7",
             [BlockType.HotfixAudio] = "F151B649",
+            [BlockType.Terrain] = "F84BF5E6",
             [BlockType.AudioChinese] = "E1E7D7CE",
             [BlockType.AudioEnglish] = "A31457D0",
             [BlockType.AudioJapanese] = "F668D4EE",
             [BlockType.AudioKorean] = "E9D31017",
+            [BlockType.JsonLipChinese] = "D3007764",
+            [BlockType.JsonLipEnglish] = "9F9F1488",
+            [BlockType.JsonLipJapanese] = "C7602E1B",
+            [BlockType.JsonLipKorean] = "F6DCF266",
         };
 
     public static string GetDirName(BlockType bt)
